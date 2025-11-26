@@ -7,6 +7,7 @@ use idevice::{
 use log::{error, info, trace, warn};
 use std::io::IoSlice;
 use std::net::Ipv6Addr;
+use std::error::Error;
 
 // GStreamer imports
 use gstreamer as gst;
@@ -38,67 +39,43 @@ struct Args {
     app_port: u16,
 }
 
-#[tokio::main]
-async fn main() {
-    env_logger::init();
-
-    // Initialize GStreamer
-    if let Err(e) = gst::init() {
-        error!("Failed to initialize GStreamer: {}", e);
-        return;
-    }
-
-    let Args {
+async fn connect_to_device(
+    udid: Option<&String>,
+    host: Option<&String>,
+    pairing_file: Option<&String>
+) -> Result<core_device_proxy::CoreDeviceProxy, Box<dyn Error>> {
+    let provider = common::get_provider(
         udid,
         host,
         pairing_file,
-        app_port,
-    } = Args::parse();
-
-    let provider = match common::get_provider(
-        udid.as_ref(),
-        host.as_ref(),
-        pairing_file.as_ref(),
         "core_device_proxy",
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(e) => {
-            error!("{e}");
-            return;
-        }
-    };
+    ).await?;
 
-    let mut tun_proxy = core_device_proxy::CoreDeviceProxy::connect(&*provider)
-        .await
-        .expect("Unable to connect");
+    let tun_proxy = core_device_proxy::CoreDeviceProxy::connect(&*provider).await?;
+    Ok(tun_proxy)
+}
 
-    // Addresses from the handshake
+fn extract_handshake_addresses(tun_proxy: &core_device_proxy::CoreDeviceProxy) -> Result<(Ipv6Addr, Ipv6Addr), Box<dyn Error>> {
     // client_addr: The IP 'we' are assigned (the host side)
     // server_addr: The IP the iOS device uses
     let client_addr: Ipv6Addr = tun_proxy
         .handshake
         .client_parameters
         .address
-        .parse()
-        .expect("Failed to parse client address");
+        .parse()?;
+        
     let server_addr: Ipv6Addr = tun_proxy
         .handshake
         .server_address
-        .parse()
-        .expect("Failed to parse server address");
+        .parse()?;
+        
+    Ok((client_addr, server_addr))
+}
 
-    info!("-----------------------------");
-    info!("UDP Tunnel Established");
-    info!("My IP (Host): {}", client_addr);
-    info!("Device IP (iOS): {}", server_addr);
-    info!("Target App Port: {}", app_port);
-    
-    // Request Screencast via Portal (Wayland/Pipewire)
+async fn start_screencast_session() -> Result<u32, Box<dyn Error>> {
     info!("Requesting screencast session via XDG Portal...");
-    let proxy = Screencast::new().await.expect("Failed to connect to Screencast portal");
-    let session = proxy.create_session().await.expect("Failed to create session");
+    let proxy = Screencast::new().await?;
+    let session = proxy.create_session().await?;
 
     proxy.select_sources(
         &session,
@@ -107,17 +84,17 @@ async fn main() {
         false, // multiple
         None,
         PersistMode::DoNot,
-    ).await.expect("Failed to select sources");
+    ).await?;
 
-    let response = proxy.start(&session, None).await.expect("Failed to start session").response().expect("Failed to get response");
+    let response = proxy.start(&session, None).await?.response()?;
     
-    let stream = response.streams().first().expect("No streams returned by portal");
+    let stream = response.streams().first().ok_or("No streams returned by portal")?;
     let node_id = stream.pipe_wire_node_id();
     
-    info!("Screencast session started. Node ID: {}", node_id);
-    info!("Initializing GStreamer pipeline...");
-    info!("-----------------------------");
+    Ok(node_id)
+}
 
+fn create_pipeline(node_id: u32) -> Result<(gst::Pipeline, tokio::sync::mpsc::Receiver<gst::Buffer>), Box<dyn Error>> {
     // Create GStreamer pipeline
     // We use zerolatency and ultrafast to minimize delay/load.
     // Note: This produces raw H.264 stream chunks.
@@ -126,27 +103,21 @@ async fn main() {
         node_id
     );
 
-    let pipeline = match gst::parse::launch(&pipeline_str) {
-        Ok(p) => p,
-        Err(e) => {
-            error!("Failed to parse pipeline: {}", e);
-            return;
-        }
-    };
+    let pipeline = gst::parse::launch(&pipeline_str)?;
 
     let pipeline = pipeline
         .downcast::<gst::Pipeline>()
-        .expect("Expected a pipeline");
+        .map_err(|_| "Expected a pipeline")?;
 
     let appsink = pipeline
         .by_name("sink")
-        .expect("Sink not found")
+        .ok_or("Sink not found")?
         .downcast::<gst_app::AppSink>()
-        .expect("Sink is not an AppSink");
+        .map_err(|_| "Sink is not an AppSink")?;
 
     // Channel to send video buffers from GST thread to Tokio thread
     // Capacity 10 to avoid growing too much backlog
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<gst::Buffer>(10);
+    let (tx, rx) = tokio::sync::mpsc::channel::<gst::Buffer>(10);
 
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
@@ -167,11 +138,22 @@ async fn main() {
             .build(),
     );
 
+    Ok((pipeline, rx))
+}
+
+async fn run_packet_loop(
+    mut tun_proxy: core_device_proxy::CoreDeviceProxy,
+    mut rx: tokio::sync::mpsc::Receiver<gst::Buffer>,
+    client_addr: Ipv6Addr,
+    server_addr: Ipv6Addr,
+    app_port: u16,
+    pipeline: gst::Pipeline,
+) {
     if let Err(e) = pipeline.set_state(gst::State::Playing) {
         error!("Unable to set the pipeline to the `Playing` state: {}", e);
         return;
     }
-
+    
     let mut frame_count = 0u64;
 
     loop {
@@ -267,4 +249,67 @@ async fn main() {
     }
 
     let _ = pipeline.set_state(gst::State::Null);
+}
+
+#[tokio::main]
+async fn main() {
+    env_logger::init();
+
+    // Initialize GStreamer
+    if let Err(e) = gst::init() {
+        error!("Failed to initialize GStreamer: {}", e);
+        return;
+    }
+
+    let Args {
+        udid,
+        host,
+        pairing_file,
+        app_port,
+    } = Args::parse();
+
+    let tun_proxy = match connect_to_device(udid.as_ref(), host.as_ref(), pairing_file.as_ref()).await {
+        Ok(p) => p,
+        Err(e) => {
+            error!("Failed to connect to device: {}", e);
+            return;
+        }
+    };
+
+    let (client_addr, server_addr) = match extract_handshake_addresses(&tun_proxy) {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            error!("Failed to parse handshake addresses: {}", e);
+            return;
+        }
+    };
+
+    info!("-----------------------------");
+    info!("UDP Tunnel Established");
+    info!("My IP (Host): {}", client_addr);
+    info!("Device IP (iOS): {}", server_addr);
+    info!("Target App Port: {}", app_port);
+    
+    // Request Screencast
+    let node_id = match start_screencast_session().await {
+        Ok(id) => id,
+        Err(e) => {
+             error!("Screencast setup failed: {}", e);
+             return;
+        }
+    };
+    
+    info!("Screencast session started. Node ID: {}", node_id);
+    info!("Initializing GStreamer pipeline...");
+    info!("-----------------------------");
+
+    let (pipeline, rx) = match create_pipeline(node_id) {
+        Ok(res) => res,
+        Err(e) => {
+            error!("Failed to create pipeline: {}", e);
+            return;
+        }
+    };
+
+    run_packet_loop(tun_proxy, rx, client_addr, server_addr, app_port, pipeline).await;
 }
