@@ -11,24 +11,31 @@ pub async fn start_session() -> Result<u32, Box<dyn Error>> {
     let proxy = Screencast::new().await?;
     let session = proxy.create_session().await?;
 
-    proxy.select_sources(
-        &session,
-        CursorMode::Embedded,
-        SourceType::Monitor | SourceType::Window,
-        false, // multiple
-        None,
-        PersistMode::DoNot,
-    ).await?;
+    proxy
+        .select_sources(
+            &session,
+            CursorMode::Embedded,
+            SourceType::Monitor | SourceType::Window | SourceType::Virtual,
+            false, // multiple
+            None,
+            PersistMode::DoNot,
+        )
+        .await?;
 
     let response = proxy.start(&session, None).await?.response()?;
-    
-    let stream = response.streams().first().ok_or("No streams returned by portal")?;
+
+    let stream = response
+        .streams()
+        .first()
+        .ok_or("No streams returned by portal")?;
     let node_id = stream.pipe_wire_node_id();
-    
+
     Ok(node_id)
 }
 
-pub fn create_pipeline(node_id: u32) -> Result<(gst::Pipeline, tokio::sync::mpsc::Receiver<gst::Buffer>), Box<dyn Error>> {
+pub fn create_pipeline(
+    node_id: u32,
+) -> Result<(gst::Pipeline, tokio::sync::mpsc::Receiver<gst::Buffer>), Box<dyn Error>> {
     // Create GStreamer pipeline
     // We use zerolatency and ultrafast to minimize delay/load.
     // Note: This produces raw H.264 stream chunks.
