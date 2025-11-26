@@ -1,5 +1,5 @@
 use clap::{Arg, Command};
-use etherparse::{Ipv6FlowLabel, Ipv6Header, PacketHeaders, UdpHeader};
+use etherparse::{IpNumber, Ipv6FlowLabel, Ipv6Header, PacketHeaders, UdpHeader};
 use idevice::{
     core_device_proxy::{self},
     IdeviceService,
@@ -9,6 +9,11 @@ use std::time::Duration;
 use tokio::time;
 
 mod common;
+
+const DEFAULT_HOP_LIMIT: u8 = 64;
+const DEFAULT_PORT: u16 = 12345;
+const FRAME_INTERVAL_MS: u64 = 33;
+const LOG_INTERVAL: u64 = 30;
 
 #[tokio::main]
 async fn main() {
@@ -87,20 +92,18 @@ async fn main() {
     println!("-----------------------------");
 
     // Simulate a video stream interval (30fps = ~33ms)
-    let mut interval = time::interval(Duration::from_millis(33));
+    let mut interval = time::interval(Duration::from_millis(FRAME_INTERVAL_MS));
     let mut frame_count = 0u64;
 
     loop {
         tokio::select! {
-            // READ from Device
             Ok(packet) = tun_proxy.recv() => {
-                // Parse the raw packet to see if it's interesting
                 match PacketHeaders::from_ip_slice(&packet) {
                     Ok(headers) => {
                         if let Some(transport) = headers.transport {
                             match transport {
                                 etherparse::TransportHeader::Udp(udp) => {
-                                    if udp.destination_port == 12345 { // Assuming we listen on 12345 too
+                                    if udp.destination_port == DEFAULT_PORT { // Assuming we listen on DEFAULT_PORT too
                                          println!("Received UDP from App: {:?} bytes payload", headers.payload.slice().len());
                                     }
                                 }
@@ -108,55 +111,50 @@ async fn main() {
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        eprintln!("Received malformed packet, ignoring {}", e)
                         // Ignore malformed packets
                     }
                 }
             }
 
-            // WRITE to Device (Simulate App Logic)
             _ = interval.tick() => {
                 frame_count += 1;
                 let payload = format!("Video Frame #{}", frame_count).into_bytes();
 
-                // 1. Construct IPv6 Header
-                let header = Ipv6Header {
+                let ipv6_header = Ipv6Header {
                     traffic_class: 0,
                     flow_label: Ipv6FlowLabel::ZERO,
-                    payload_length: (8 + payload.len()) as u16, // UDP Header (8) + Payload
-                    next_header: etherparse::IpNumber(17),
-                    hop_limit: 64,
+                    payload_length: (UdpHeader::LEN + payload.len()) as u16,
+                    next_header: IpNumber::UDP,
+                    hop_limit: DEFAULT_HOP_LIMIT,
                     source: client_addr.octets(),
                     destination: server_addr.octets(),
                 };
 
-                // 2. Construct UDP Header
                 let mut udp_header = UdpHeader {
-                    source_port: 12345, // Our fake sender port
+                    source_port: DEFAULT_PORT,
                     destination_port: app_port,
-                    length: (8 + payload.len()) as u16,
+                    length: (UdpHeader::LEN + payload.len()) as u16,
                     checksum: 0,
                 };
 
-                // Calculate UDP Checksum (Crucial for iOS to accept it)
                 udp_header.checksum = udp_header.calc_checksum_ipv6(
-                    &header,
+                    &ipv6_header,
                     &payload
                 ).expect("Checksum calculation failed");
 
-                // 3. Serialize to buffer
-                let mut packet_buf = Vec::with_capacity(header.header_len() + udp_header.header_len() + payload.len());
-                header.write(&mut packet_buf).unwrap();
+                let mut packet_buf = Vec::with_capacity(ipv6_header.header_len() + udp_header.header_len() + payload.len());
+                ipv6_header.write(&mut packet_buf).unwrap();
                 udp_header.write(&mut packet_buf).unwrap();
                 packet_buf.extend_from_slice(&payload);
 
-                // 4. Send
                 if let Err(e) = tun_proxy.send(&packet_buf).await {
                     eprintln!("Failed to send packet: {}", e);
                     break;
                 }
 
-                if frame_count % 30 == 0 {
+                if frame_count % LOG_INTERVAL == 0 {
                      println!("Sent {} frames...", frame_count);
                 }
             }
