@@ -1,5 +1,5 @@
 use clap::{Arg, Command};
-use etherparse::{Ipv6Header, PacketHeaders, UdpHeader};
+use etherparse::{Ipv6FlowLabel, Ipv6Header, PacketHeaders, UdpHeader};
 use idevice::{
     core_device_proxy::{self},
     IdeviceService,
@@ -101,7 +101,7 @@ async fn main() {
                             match transport {
                                 etherparse::TransportHeader::Udp(udp) => {
                                     if udp.destination_port == 12345 { // Assuming we listen on 12345 too
-                                         println!("Received UDP from App: {:?} bytes payload", headers.payload.len());
+                                         println!("Received UDP from App: {:?} bytes payload", headers.payload.slice().len());
                                     }
                                 }
                                 _ => {}
@@ -122,9 +122,9 @@ async fn main() {
                 // 1. Construct IPv6 Header
                 let header = Ipv6Header {
                     traffic_class: 0,
-                    flow_label: 0,
+                    flow_label: Ipv6FlowLabel::ZERO,
                     payload_length: (8 + payload.len()) as u16, // UDP Header (8) + Payload
-                    next_header: 17,
+                    next_header: etherparse::IpNumber(17),
                     hop_limit: 64,
                     source: client_addr.octets(),
                     destination: server_addr.octets(),
