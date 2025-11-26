@@ -24,7 +24,7 @@ Pod::Spec.new do |s|
     'FRAMEWORK_SEARCH_PATHS' => '"$(PODS_TARGET_SRCROOT)/ios/Frameworks" "/Library/Frameworks"'
   }
 
-  s.prepare_command = 'bash setup_gstreamer.sh'
+  s.prepare_command = 'bash setup_gstreamer.sh && bash setup_rust.sh'
 
   s.script_phases = [
     {

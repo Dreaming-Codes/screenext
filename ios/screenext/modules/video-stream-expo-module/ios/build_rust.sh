@@ -29,7 +29,11 @@ fi
 echo "Building Rust library 'ios_stream_handler' for target: $TARGET"
 
 if ! command -v cargo &> /dev/null; then
-    export PATH="$HOME/.cargo/bin:$PATH"
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    elif [ -d "$HOME/.cargo/bin" ]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
 fi
 
 pushd "$RUST_ROOT"
