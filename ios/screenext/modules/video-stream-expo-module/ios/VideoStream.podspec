@@ -1,27 +1,20 @@
-require 'json'
-
-package = JSON.parse(File.read(File.join(__dir__, '..', 'package.json')))
-
 Pod::Spec.new do |s|
   s.name           = 'VideoStream'
-  s.version        = package['version']
-  s.summary        = package['description']
-  s.description    = package['description']
-  s.license        = package['license']
-  s.author         = package['author']
-  s.homepage       = package['homepage']
+  s.version        = '1.0.0'
+  s.summary        = 'screenext native module for expo'
+  s.description    = 'handles video decoding from GStreamer'
+  s.author         = 'DreamingCodes'
+  s.homepage       = 'https://docs.expo.dev/modules/'
   s.platforms      = {
     :ios => '15.1',
     :tvos => '15.1'
   }
-  s.swift_version  = '5.9'
-  s.source         = { git: 'https://github.com/Dreaming-Codes/screenext/ios/video-stream-expo-module' }
+  s.source         = { git: '' }
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
 
   # Swift/Objective-C compatibility
-
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',
     'SWIFT_OBJC_BRIDGING_HEADER' => '$(PODS_TARGET_SRCROOT)/ios/StreamHandler.h',
