@@ -5,8 +5,8 @@ set -e
 cd "$(dirname "$0")"
 
 # --- CONFIGURATION ---
-GST_VERSION="1.24.10"
-GST_IOS_PKG_URL="https://gstreamer.freedesktop.org/data/pkg/ios/${GST_VERSION}/gstreamer-1.0-devel-ios-universal-${GST_VERSION}.pkg"
+GST_VERSION="1.26.8"
+GST_IOS_PKG_URL="https://gstreamer.freedesktop.org/data/pkg/ios/${GST_VERSION}/gstreamer-1.0-devel-${GST_VERSION}-ios-universal.pkg"
 # Frameworks dir is now current dir since we are in ios/
 FRAMEWORKS_DIR="$(pwd)/Frameworks"
 GST_FRAMEWORK_PATH="${FRAMEWORKS_DIR}/GStreamer.framework"
