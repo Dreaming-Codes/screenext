@@ -4,7 +4,7 @@ use idevice::{
     core_device_proxy::{self},
     IdeviceService,
 };
-use log::{error, info, warn};
+use log::{error, info, trace, warn};
 use std::net::Ipv6Addr;
 
 // GStreamer imports
@@ -83,7 +83,7 @@ async fn main() {
         .expect("Failed to parse server address");
 
     info!("-----------------------------");
-    info!("Manual UDP Tunnel Established");
+    info!("UDP Tunnel Established");
     info!("My IP (Host): {}", client_addr);
     info!("Device IP (iOS): {}", server_addr);
     info!("Target App Port: {}", app_port);
@@ -208,7 +208,7 @@ async fn main() {
                 }
 
                 if frame_count % LOG_INTERVAL == 0 {
-                     info!("Sent {} video packets (len: {})", frame_count, payload.len());
+                     trace!("Sent {} video packets (len: {})", frame_count, payload.len());
                 }
             }
 
