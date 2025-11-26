@@ -1,0 +1,4 @@
+module StreamHandler {
+    header "StreamHandler.h"
+    export *
+}
