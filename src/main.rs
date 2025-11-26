@@ -4,6 +4,7 @@ use idevice::{
     core_device_proxy::{self},
     IdeviceService,
 };
+use log::{error, info, warn};
 use std::net::Ipv6Addr;
 use std::time::Duration;
 use tokio::time;
@@ -48,7 +49,7 @@ async fn main() {
     {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("{e}");
+            error!("{e}");
             return;
         }
     };
@@ -72,13 +73,13 @@ async fn main() {
         .parse()
         .expect("Failed to parse server address");
 
-    println!("-----------------------------");
-    println!("Manual UDP Tunnel Established");
-    println!("My IP (Host): {}", client_addr);
-    println!("Device IP (iOS): {}", server_addr);
-    println!("Target App Port: {}", app_port);
-    println!("Sending dummy video frames...");
-    println!("-----------------------------");
+    info!("-----------------------------");
+    info!("Manual UDP Tunnel Established");
+    info!("My IP (Host): {}", client_addr);
+    info!("Device IP (iOS): {}", server_addr);
+    info!("Target App Port: {}", app_port);
+    info!("Sending dummy video frames...");
+    info!("-----------------------------");
 
     // Simulate a video stream interval (30fps = ~33ms)
     let mut interval = time::interval(Duration::from_millis(FRAME_INTERVAL_MS));
@@ -93,7 +94,7 @@ async fn main() {
                             match transport {
                                 etherparse::TransportHeader::Udp(udp) => {
                                     if udp.destination_port == app_port {
-                                         println!("Received UDP from App: {:?} bytes payload", headers.payload.slice().len());
+                                         info!("Received UDP from App: {:?} bytes payload", headers.payload.slice().len());
                                     }
                                 }
                                 _ => {}
@@ -101,7 +102,7 @@ async fn main() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Received malformed packet, ignoring {}", e)
+                        warn!("Received malformed packet, ignoring {}", e)
                         // Ignore malformed packets
                     }
                 }
@@ -139,12 +140,12 @@ async fn main() {
                 packet_buf.extend_from_slice(&payload);
 
                 if let Err(e) = tun_proxy.send(&packet_buf).await {
-                    eprintln!("Failed to send packet: {}", e);
+                    error!("Failed to send packet: {}", e);
                     break;
                 }
 
                 if frame_count % LOG_INTERVAL == 0 {
-                     println!("Sent {} frames...", frame_count);
+                     info!("Sent {} frames...", frame_count);
                 }
             }
         }
