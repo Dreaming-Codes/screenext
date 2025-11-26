@@ -1,5 +1,5 @@
 [package]
-name = "core_device_proxy_tun"
+name = "screenext"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,3 +12,7 @@ env_logger = "0.11"
 log = "0.4"
 gstreamer = "0.24.3"
 gstreamer-app = "0.24.2"
+ashpd = "0.12.0"
+
+[patch.crates-io]
+idevice = { git = "https://github.com/Dreaming-Codes/idevice", branch = "vectorized-io" }

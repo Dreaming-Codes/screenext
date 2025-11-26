@@ -5,6 +5,7 @@ use idevice::{
     IdeviceService,
 };
 use log::{error, info, trace, warn};
+use std::io::IoSlice;
 use std::net::Ipv6Addr;
 
 // GStreamer imports
@@ -13,6 +14,12 @@ use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 
 mod common;
+
+use common::MessageType;
+
+// XDG Portal / Pipewire imports
+use ashpd::desktop::screencast::{CursorMode, Screencast, SourceType};
+use ashpd::desktop::PersistMode;
 
 const DEFAULT_HOP_LIMIT: u8 = 64;
 const LOG_INTERVAL: u64 = 30;
@@ -87,16 +94,39 @@ async fn main() {
     info!("My IP (Host): {}", client_addr);
     info!("Device IP (iOS): {}", server_addr);
     info!("Target App Port: {}", app_port);
+    
+    // Request Screencast via Portal (Wayland/Pipewire)
+    info!("Requesting screencast session via XDG Portal...");
+    let proxy = Screencast::new().await.expect("Failed to connect to Screencast portal");
+    let session = proxy.create_session().await.expect("Failed to create session");
+
+    proxy.select_sources(
+        &session,
+        CursorMode::Embedded,
+        SourceType::Monitor | SourceType::Window,
+        false, // multiple
+        None,
+        PersistMode::DoNot,
+    ).await.expect("Failed to select sources");
+
+    let response = proxy.start(&session, None).await.expect("Failed to start session").response().expect("Failed to get response");
+    
+    let stream = response.streams().first().expect("No streams returned by portal");
+    let node_id = stream.pipe_wire_node_id();
+    
+    info!("Screencast session started. Node ID: {}", node_id);
     info!("Initializing GStreamer pipeline...");
     info!("-----------------------------");
 
     // Create GStreamer pipeline
-    // pipewiresrc -> queue -> videoconvert -> x264enc -> appsink
     // We use zerolatency and ultrafast to minimize delay/load.
     // Note: This produces raw H.264 stream chunks.
-    let pipeline_str = "pipewiresrc ! queue ! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast ! rtph264pay ! appsink name=sink sync=false";
+    let pipeline_str = format!(
+        "pipewiresrc path={} ! queue ! videoconvert ! x264enc tune=zerolatency speed-preset=ultrafast ! rtph264pay ! appsink name=sink sync=false",
+        node_id
+    );
 
-    let pipeline = match gst::parse::launch(pipeline_str) {
+    let pipeline = match gst::parse::launch(&pipeline_str) {
         Ok(p) => p,
         Err(e) => {
             error!("Failed to parse pipeline: {}", e);
@@ -116,19 +146,19 @@ async fn main() {
 
     // Channel to send video buffers from GST thread to Tokio thread
     // Capacity 10 to avoid growing too much backlog
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(10);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<gst::Buffer>(10);
 
     appsink.set_callbacks(
         gst_app::AppSinkCallbacks::builder()
             .new_sample(move |appsink| {
                 let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                 let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
 
-                let data = map.as_slice().to_vec();
+                // Cheap ref-count clone to send to the other thread
+                let buffer = buffer.to_owned();
 
                 // blocking_send is okay here because we are in the GStreamer streaming thread
-                if let Err(_) = tx.blocking_send(data) {
+                if let Err(_) = tx.blocking_send(buffer) {
                     return Err(gst::FlowError::Eos);
                 }
 
@@ -166,19 +196,30 @@ async fn main() {
                 }
             }
 
-            Some(payload) = rx.recv() => {
+            Some(buffer) = rx.recv() => {
                 frame_count += 1;
 
+                let map = match buffer.map_readable() {
+                    Ok(map) => map,
+                    Err(e) => {
+                        warn!("Failed to map buffer: {}", e);
+                        continue;
+                    }
+                };
+                let payload = map.as_slice();
+
                 // Safety check for IPv6 u16 payload length limit
-                if payload.len() + UdpHeader::LEN > u16::MAX as usize {
-                    warn!("Video frame too large ({}), dropping. Max UDP payload {}.", payload.len(), u16::MAX);
+                let payload_len = payload.len() + std::mem::size_of::<MessageType>();
+
+                if payload_len + UdpHeader::LEN > u16::MAX as usize {
+                    warn!("Video frame too large ({}), dropping. Max UDP payload {}.", payload_len, u16::MAX);
                     continue;
                 }
 
                 let ipv6_header = Ipv6Header {
                     traffic_class: 0,
                     flow_label: Ipv6FlowLabel::ZERO,
-                    payload_length: (UdpHeader::LEN + payload.len()) as u16,
+                    payload_length: (UdpHeader::LEN + payload_len) as u16,
                     next_header: IpNumber::UDP,
                     hop_limit: DEFAULT_HOP_LIMIT,
                     source: client_addr.octets(),
@@ -188,27 +229,33 @@ async fn main() {
                 let mut udp_header = UdpHeader {
                     source_port: app_port,
                     destination_port: app_port,
-                    length: (UdpHeader::LEN + payload.len()) as u16,
+                    length: (UdpHeader::LEN + payload_len) as u16,
                     checksum: 0,
                 };
 
-                udp_header.checksum = udp_header.calc_checksum_ipv6(
-                    &ipv6_header,
-                    &payload
-                ).expect("Checksum calculation failed");
+                let msg_type = MessageType::Video;
+                udp_header.checksum = common::calculate_checksum(&ipv6_header, &udp_header, msg_type, payload);
 
-                let mut packet_buf = Vec::with_capacity(ipv6_header.header_len() + udp_header.header_len() + payload.len());
-                ipv6_header.write(&mut packet_buf).unwrap();
-                udp_header.write(&mut packet_buf).unwrap();
-                packet_buf.extend_from_slice(&payload);
+                // Serialize headers
+                // We have valid checksum now so we can serialize directly
+                let mut header_buf = Vec::with_capacity(ipv6_header.header_len() + udp_header.header_len());
+                ipv6_header.write(&mut header_buf).unwrap();
+                udp_header.write(&mut header_buf).unwrap();
 
-                if let Err(e) = tun_proxy.send(&packet_buf).await {
+                let msg_slice = [msg_type as u8];
+                let bufs = [
+                    IoSlice::new(&header_buf),
+                    IoSlice::new(&msg_slice),
+                    IoSlice::new(payload),
+                ];
+
+                if let Err(e) = tun_proxy.send_vectored(&bufs).await {
                     error!("Failed to send packet: {}", e);
                     break;
                 }
 
                 if frame_count % LOG_INTERVAL == 0 {
-                     trace!("Sent {} video packets (len: {})", frame_count, payload.len());
+                     trace!("Sent {} video packets (len: {})", frame_count, payload_len);
                 }
             }
 
