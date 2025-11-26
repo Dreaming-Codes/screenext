@@ -1,4 +1,4 @@
-use clap::{Arg, Command};
+use clap::Parser;
 use etherparse::{IpNumber, Ipv6FlowLabel, Ipv6Header, PacketHeaders, UdpHeader};
 use idevice::{
     core_device_proxy::{self},
@@ -11,52 +11,41 @@ use tokio::time;
 mod common;
 
 const DEFAULT_HOP_LIMIT: u8 = 64;
-const DEFAULT_PORT: u16 = 12345;
 const FRAME_INTERVAL_MS: u64 = 33;
 const LOG_INTERVAL: u64 = 30;
+
+#[derive(Parser)]
+#[command(version, about)]
+struct Args {
+    /// IP address of the device
+    #[arg(short = 'H', long, value_name = "HOST")]
+    host: Option<String>,
+    #[arg(short, long, value_name = "PAIRING_FILE")]
+    pairing_file: Option<String>,
+    #[arg(short, long, value_name = "UDID")]
+    udid: Option<String>,
+    #[arg(short, long, value_name = "PORT", default_value_t = 12345)]
+    app_port: u16,
+}
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    let matches = Command::new("core_device_proxy_tun")
-        .about("Start a tunnel")
-        .arg(
-            Arg::new("host")
-                .long("host")
-                .value_name("HOST")
-                .help("IP address of the device"),
-        )
-        .arg(
-            Arg::new("pairing_file")
-                .long("pairing-file")
-                .value_name("PATH")
-                .help("Path to the pairing file"),
-        )
-        .arg(
-            Arg::new("udid")
-                .value_name("UDID")
-                .help("UDID of the device (overrides host/pairing file)")
-                .index(1),
-        )
-        .arg(
-            Arg::new("app-port")
-                .long("port")
-                .value_name("PORT")
-                .help("UDP port the iOS app is listening on")
-                .default_value("12345"),
-        )
-        .get_matches();
+    let Args {
+        udid,
+        host,
+        pairing_file,
+        app_port,
+    } = Args::parse();
 
-    let udid = matches.get_one::<String>("udid");
-    let host = matches.get_one::<String>("host");
-    let pairing_file = matches.get_one::<String>("pairing_file");
-    let app_port: u16 = matches
-        .get_one::<String>("app-port")
-        .unwrap()
-        .parse()
-        .expect("Invalid port");
-
-    let provider = match common::get_provider(udid, host, pairing_file, "core_device_proxy").await {
+    let provider = match common::get_provider(
+        udid.as_ref(),
+        host.as_ref(),
+        pairing_file.as_ref(),
+        "core_device_proxy",
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
@@ -103,7 +92,7 @@ async fn main() {
                         if let Some(transport) = headers.transport {
                             match transport {
                                 etherparse::TransportHeader::Udp(udp) => {
-                                    if udp.destination_port == DEFAULT_PORT { // Assuming we listen on DEFAULT_PORT too
+                                    if udp.destination_port == app_port {
                                          println!("Received UDP from App: {:?} bytes payload", headers.payload.slice().len());
                                     }
                                 }
@@ -133,7 +122,7 @@ async fn main() {
                 };
 
                 let mut udp_header = UdpHeader {
-                    source_port: DEFAULT_PORT,
+                    source_port: app_port,
                     destination_port: app_port,
                     length: (UdpHeader::LEN + payload.len()) as u16,
                     checksum: 0,
