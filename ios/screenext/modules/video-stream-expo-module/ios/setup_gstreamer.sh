@@ -25,6 +25,16 @@ if [ -d "$GST_FRAMEWORK_PATH" ]; then
     exit 0
 fi
 
+# 3. Check standard user install location
+USER_GST_PATH="$HOME/Library/Developer/GStreamer/iPhone.sdk/GStreamer.framework"
+if [ -d "$USER_GST_PATH" ]; then
+    echo "Found GStreamer in user path: $USER_GST_PATH"
+    echo "Copying to local frameworks..."
+    mkdir -p "$FRAMEWORKS_DIR"
+    cp -R "$USER_GST_PATH" "$FRAMEWORKS_DIR/"
+    exit 0
+fi
+
 echo "GStreamer framework not found. Downloading version ${GST_VERSION}..."
 
 mkdir -p "$FRAMEWORKS_DIR"
@@ -36,22 +46,13 @@ curl -L -o "$PKG_FILE" "$GST_IOS_PKG_URL"
 
 echo "Unpacking GStreamer framework..."
 cd "$TMP_DIR"
-xar -xf "$PKG_FILE"
 
-PAYLOAD_FILE=$(find . -name "Payload" | head -n 1)
-
-if [ -z "$PAYLOAD_FILE" ]; then
-    echo "Error: Could not find Payload in downloaded package."
-    exit 1
-fi
-
-# Extract Payload
-mkdir -p extracted
-cd extracted
-cat "../$PAYLOAD_FILE" | gunzip -dc | cpio -i 2>/dev/null
+# Use pkgutil to expand the package (handles pbzx compression correctly)
+# This is safer than xar + gunzip as modern pkgs often use pbzx
+pkgutil --expand-full "$PKG_FILE" expanded
 
 # Move Framework
-SOURCE_FW=$(find . -name "GStreamer.framework" | head -n 1)
+SOURCE_FW=$(find expanded -name "GStreamer.framework" | head -n 1)
 
 if [ -z "$SOURCE_FW" ]; then
     echo "Error: Could not find GStreamer.framework in unpacked payload."
